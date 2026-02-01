@@ -119,10 +119,18 @@ function transformLogEntry(entry) {
   else if (subsystem === 'agent/embedded') {
     shouldInclude = false;
   }
-  // === ERRORS ===
+  // === ERRORS (skip Node.js warnings and deprecations) ===
   else if (level === 'ERROR') {
-    eventType = 'error';
-    friendlyMessage = rawMessage || entry['0'] || 'Error occurred';
+    const msg = rawMessage || entry['0'] || '';
+    // Skip Node.js internal warnings
+    if (msg.includes('DeprecationWarning') ||
+        msg.includes('NODE_TLS_REJECT_UNAUTHORIZED') ||
+        msg.startsWith('(node:')) {
+      shouldInclude = false;
+    } else {
+      eventType = 'error';
+      friendlyMessage = stripAnsi(msg) || 'Error occurred';
+    }
   }
   // === WhatsApp inbound info ===
   else if (subsystem === 'gateway/channels/whatsapp/inbound') {
@@ -167,11 +175,15 @@ function transformLogEntry(entry) {
   else if (subsystem === 'openclaw' && (!rawMessage || rawMessage.includes('res ✓') || rawMessage.includes('⇄'))) {
     shouldInclude = false;
   }
-  // === Other openclaw messages (errors, warnings) ===
+  // === Other openclaw messages (only errors) ===
   else if (subsystem === 'openclaw') {
-    eventType = level === 'ERROR' ? 'error' : 'system';
-    friendlyMessage = stripAnsi(rawMessage || entry['0'] || '');
-    if (!friendlyMessage) shouldInclude = false;
+    if (level === 'ERROR') {
+      eventType = 'error';
+      friendlyMessage = stripAnsi(rawMessage || entry['0'] || '');
+    } else {
+      // Skip system/info messages (startup noise, registered hooks, etc.)
+      shouldInclude = false;
+    }
   }
   // === DEFAULT: skip unknown noise ===
   else {
