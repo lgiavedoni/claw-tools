@@ -272,3 +272,25 @@
 .log-entry.warn {
   border-left: 3px solid #f59e0b;
 }
+
+/* Jump to bottom button */
+.jump-to-bottom {
+  position: fixed;
+  bottom: 60px;
+  right: 20px;
+  padding: 0.5rem 1rem;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s;
+  z-index: 100;
+}
+
+.jump-to-bottom:hover {
+  background: #2563eb;
+  transform: translateY(-2px);
+}

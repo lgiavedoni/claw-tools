@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import './App.css'
 
 interface LogEntry {
@@ -50,11 +50,29 @@ function App() {
     autoRefresh: true,
     refreshInterval: 5000,
     showLevel: 'all',
-    limit: 200,
+    limit: 500,
   })
   const [showSettings, setShowSettings] = useState(false)
+  const [autoScroll, setAutoScroll] = useState(true)
+
+  const logsContainerRef = useRef<HTMLDivElement>(null)
+  const logsEndRef = useRef<HTMLDivElement>(null)
 
   const API_BASE = 'http://localhost:3001'
+
+  const scrollToBottom = useCallback(() => {
+    if (autoScroll && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [autoScroll])
+
+  // Check if user has scrolled up (disable auto-scroll)
+  const handleScroll = useCallback(() => {
+    if (!logsContainerRef.current) return
+    const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 100
+    setAutoScroll(isAtBottom)
+  }, [])
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -101,8 +119,13 @@ function App() {
     return () => clearInterval(interval)
   }, [settings.autoRefresh, settings.refreshInterval, fetchLogs])
 
+  // Auto-scroll to bottom when logs change
+  useEffect(() => {
+    scrollToBottom()
+  }, [logs, scrollToBottom])
+
   // Group consecutive similar messages
-  const groupedLogs = logs.reduce<(LogEntry & { count: number })[]>((acc, log, i) => {
+  const groupedLogs = logs.reduce<(LogEntry & { count: number })[]>((acc, log) => {
     const prev = acc[acc.length - 1]
     if (prev && prev.message === log.message && prev.subsystem === log.subsystem) {
       prev.count++
@@ -112,6 +135,11 @@ function App() {
     }
     return acc
   }, [])
+
+  const jumpToBottom = () => {
+    setAutoScroll(true)
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
 
   return (
     <div className="app">
@@ -171,9 +199,9 @@ function App() {
             <input
               type="number"
               value={settings.limit}
-              onChange={(e) => setSettings({ ...settings, limit: parseInt(e.target.value) || 200 })}
+              onChange={(e) => setSettings({ ...settings, limit: parseInt(e.target.value) || 500 })}
               min={50}
-              max={2000}
+              max={5000}
             />
           </div>
           <div className="setting checkbox">
@@ -195,7 +223,11 @@ function App() {
         </div>
       )}
 
-      <main className="logs-container">
+      <main
+        className="logs-container"
+        ref={logsContainerRef}
+        onScroll={handleScroll}
+      >
         {loading ? (
           <div className="loading">Loading logs...</div>
         ) : groupedLogs.length === 0 ? (
@@ -243,12 +275,19 @@ function App() {
                 )}
               </div>
             ))}
+            <div ref={logsEndRef} />
           </div>
         )}
       </main>
 
+      {!autoScroll && (
+        <button className="jump-to-bottom" onClick={jumpToBottom}>
+          Jump to latest
+        </button>
+      )}
+
       <footer className="footer">
-        <span>{logs.length} entries</span>
+        <span>{logs.length} entries ({groupedLogs.length} grouped)</span>
         {settings.autoRefresh && <span className="pulse">Live</span>}
       </footer>
     </div>
