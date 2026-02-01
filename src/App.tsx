@@ -10,19 +10,7 @@ interface LogEntry {
   message: string
   rawMessage: string
   data: Record<string, unknown>
-  raw: Record<string, unknown>
-  hidden?: boolean
 }
-
-interface Settings {
-  logDir: string
-  logFile: string
-  autoRefresh: boolean
-  refreshInterval: number
-  limit: number
-}
-
-const HIDDEN_TAGS_DEFAULT = ['memory', 'web-heartbeat', 'diagnostic', 'plugins', 'gateway/ws']
 
 function App() {
   const [logs, setLogs] = useState<LogEntry[]>([])
@@ -30,17 +18,10 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expandedLog, setExpandedLog] = useState<number | null>(null)
-  const [settings, setSettings] = useState<Settings>({
-    logDir: '/tmp/openclaw',
-    logFile: '',
-    autoRefresh: true,
-    refreshInterval: 3000,
-    limit: 1000,
-  })
-  const [showSettings, setShowSettings] = useState(false)
+  const [logFile, setLogFile] = useState('')
+  const [autoRefresh, setAutoRefresh] = useState(true)
   const [autoScroll, setAutoScroll] = useState(true)
-  const [hiddenTags, setHiddenTags] = useState<Set<string>>(new Set(HIDDEN_TAGS_DEFAULT))
-  const [allTags, setAllTags] = useState<string[]>([])
+  const [showSettings, setShowSettings] = useState(false)
 
   const logsContainerRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
@@ -63,9 +44,8 @@ function App() {
   const fetchLogs = useCallback(async () => {
     try {
       const params = new URLSearchParams({
-        dir: settings.logDir,
-        ...(settings.logFile && { file: settings.logFile }),
-        limit: settings.limit.toString(),
+        ...(logFile && { file: logFile }),
+        limit: '500',
       })
       const res = await fetch(`${API_BASE}/api/logs?${params}`)
       const data = await res.json()
@@ -75,32 +55,23 @@ function App() {
       } else {
         setError(null)
       }
-
-      const processedLogs = data.logs || []
-      setLogs(processedLogs)
-
-      // Collect all unique tags
-      const tags = new Set<string>()
-      processedLogs.forEach((log: LogEntry) => {
-        if (log.subsystem) tags.add(log.subsystem)
-      })
-      setAllTags(Array.from(tags).sort())
+      setLogs(data.logs || [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch logs')
     } finally {
       setLoading(false)
     }
-  }, [settings.logDir, settings.logFile, settings.limit])
+  }, [logFile])
 
   const fetchFiles = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/logs/files?dir=${settings.logDir}`)
+      const res = await fetch(`${API_BASE}/api/logs/files`)
       const data = await res.json()
       setFiles(data.files || [])
     } catch {
       // Ignore
     }
-  }, [settings.logDir])
+  }, [])
 
   useEffect(() => {
     fetchLogs()
@@ -108,40 +79,14 @@ function App() {
   }, [fetchLogs, fetchFiles])
 
   useEffect(() => {
-    if (!settings.autoRefresh) return
-    const interval = setInterval(fetchLogs, settings.refreshInterval)
+    if (!autoRefresh) return
+    const interval = setInterval(fetchLogs, 3000)
     return () => clearInterval(interval)
-  }, [settings.autoRefresh, settings.refreshInterval, fetchLogs])
+  }, [autoRefresh, fetchLogs])
 
   useEffect(() => {
     scrollToBottom()
   }, [logs, scrollToBottom])
-
-  const toggleTag = (tag: string) => {
-    setHiddenTags(prev => {
-      const next = new Set(prev)
-      if (next.has(tag)) {
-        next.delete(tag)
-      } else {
-        next.add(tag)
-      }
-      return next
-    })
-  }
-
-  // Filter and group logs
-  const visibleLogs = logs.filter(log => !hiddenTags.has(log.subsystem))
-
-  const groupedLogs = visibleLogs.reduce<(LogEntry & { count: number })[]>((acc, log) => {
-    const prev = acc[acc.length - 1]
-    if (prev && prev.message === log.message && prev.subsystem === log.subsystem && prev.eventType === log.eventType) {
-      prev.count++
-      prev.time = log.time
-    } else {
-      acc.push({ ...log, count: 1 })
-    }
-    return acc
-  }, [])
 
   const jumpToBottom = () => {
     setAutoScroll(true)
@@ -159,14 +104,14 @@ function App() {
     }
   }
 
-  const getEventClass = (eventType: string) => {
+  const getEventLabel = (eventType: string) => {
     switch (eventType) {
-      case 'user-message': return 'event-user'
-      case 'agent-thinking': return 'event-thinking'
-      case 'agent-response': return 'event-response'
-      case 'tool-use': return 'event-tool'
-      case 'error': return 'event-error'
-      default: return 'event-system'
+      case 'user-message': return 'You'
+      case 'agent-thinking': return 'Thinking'
+      case 'agent-response': return 'Agent'
+      case 'tool-use': return 'Tool'
+      case 'error': return 'Error'
+      default: return 'System'
     }
   }
 
@@ -182,110 +127,59 @@ function App() {
             onClick={() => setShowSettings(!showSettings)}
             className={`btn btn-secondary ${showSettings ? 'active' : ''}`}
           >
-            Settings
+            ⚙️
           </button>
         </div>
       </header>
 
       {showSettings && (
         <div className="settings-panel">
-          <div className="settings-row">
-            <div className="setting">
-              <label>Log Directory</label>
-              <input
-                type="text"
-                value={settings.logDir}
-                onChange={(e) => setSettings({ ...settings, logDir: e.target.value })}
-              />
-            </div>
-            <div className="setting">
-              <label>Log File</label>
-              <select
-                value={settings.logFile}
-                onChange={(e) => setSettings({ ...settings, logFile: e.target.value })}
-              >
-                <option value="">Today's log</option>
-                {files.map(f => (
-                  <option key={f} value={f}>{f}</option>
-                ))}
-              </select>
-            </div>
-            <div className="setting">
-              <label>Max Entries</label>
-              <input
-                type="number"
-                value={settings.limit}
-                onChange={(e) => setSettings({ ...settings, limit: parseInt(e.target.value) || 1000 })}
-                min={100}
-                max={10000}
-              />
-            </div>
-            <div className="setting checkbox">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={settings.autoRefresh}
-                  onChange={(e) => setSettings({ ...settings, autoRefresh: e.target.checked })}
-                />
-                Auto-refresh
-              </label>
-            </div>
-          </div>
-
-          <div className="tags-filter">
-            <span className="tags-label">Filter tags:</span>
-            <div className="tags-list">
-              {allTags.map(tag => (
-                <button
-                  key={tag}
-                  className={`tag-btn ${hiddenTags.has(tag) ? 'hidden' : 'visible'}`}
-                  onClick={() => toggleTag(tag)}
-                >
-                  {tag}
-                </button>
+          <div className="setting">
+            <label>Log File</label>
+            <select value={logFile} onChange={(e) => setLogFile(e.target.value)}>
+              <option value="">Today</option>
+              {files.map(f => (
+                <option key={f} value={f}>{f.replace('openclaw-', '').replace('.log', '')}</option>
               ))}
-            </div>
+            </select>
+          </div>
+          <div className="setting checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+              />
+              Auto-refresh
+            </label>
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="error-banner">{error}</div>
-      )}
+      {error && <div className="error-banner">{error}</div>}
 
       <main className="logs-container" ref={logsContainerRef} onScroll={handleScroll}>
         {loading ? (
           <div className="loading">Loading...</div>
-        ) : groupedLogs.length === 0 ? (
-          <div className="empty">No logs found</div>
+        ) : logs.length === 0 ? (
+          <div className="empty">No activity yet</div>
         ) : (
           <div className="chat-list">
-            {groupedLogs.map((log, i) => (
+            {logs.map((log, i) => (
               <div
                 key={i}
-                className={`chat-entry ${getEventClass(log.eventType)} ${expandedLog === i ? 'expanded' : ''}`}
+                className={`chat-entry event-${log.eventType} ${expandedLog === i ? 'expanded' : ''}`}
                 onClick={() => setExpandedLog(expandedLog === i ? null : i)}
               >
                 <div className="chat-icon">{getEventIcon(log.eventType)}</div>
                 <div className="chat-content">
                   <div className="chat-header">
+                    <span className="chat-label">{getEventLabel(log.eventType)}</span>
                     <span className="chat-time">{log.time}</span>
-                    <span className={`chat-tag tag-${log.eventType}`}>{log.subsystem}</span>
-                    {log.count > 1 && <span className="chat-count">×{log.count}</span>}
                   </div>
                   <div className="chat-message">{log.message}</div>
-                  {expandedLog === i && (
-                    <div className="chat-details">
-                      {log.rawMessage !== log.message && (
-                        <div className="detail-row">
-                          <span className="detail-label">Raw:</span>
-                          <span className="detail-value">{log.rawMessage}</span>
-                        </div>
-                      )}
-                      {Object.keys(log.data).length > 0 && (
-                        <pre className="detail-json">{JSON.stringify(log.data, null, 2)}</pre>
-                      )}
-                    </div>
+                  {expandedLog === i && Object.keys(log.data).length > 0 && (
+                    <pre className="chat-details">{JSON.stringify(log.data, null, 2)}</pre>
                   )}
                 </div>
               </div>
@@ -296,14 +190,12 @@ function App() {
       </main>
 
       {!autoScroll && (
-        <button className="jump-btn" onClick={jumpToBottom}>
-          ↓ Jump to latest
-        </button>
+        <button className="jump-btn" onClick={jumpToBottom}>↓ Latest</button>
       )}
 
       <footer className="footer">
-        <span>{visibleLogs.length} of {logs.length} entries</span>
-        {settings.autoRefresh && <span className="live-indicator">● Live</span>}
+        <span>{logs.length} events</span>
+        {autoRefresh && <span className="live-indicator">● Live</span>}
       </footer>
     </div>
   )

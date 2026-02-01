@@ -19,19 +19,15 @@ function getTodayLogFile() {
 
 function parseLogLine(line) {
   const trimmed = line.trim();
-  if (!trimmed) return null;
-
-  const jsonMatch = trimmed.match(/\{.*\}$/);
-  if (!jsonMatch) return null;
+  if (!trimmed || !trimmed.startsWith('{')) return null;
 
   try {
-    return JSON.parse(jsonMatch[0]);
+    return JSON.parse(trimmed);
   } catch {
     return null;
   }
 }
 
-// Strip ANSI codes from strings
 function stripAnsi(str) {
   if (typeof str !== 'string') return str;
   return str.replace(/\u001b\[[0-9;]*m/g, '');
@@ -46,22 +42,18 @@ function transformLogEntry(entry) {
 
   // Get subsystem
   let subsystem = 'system';
-  let moduleInfo = {};
   try {
-    if (entry['0']) {
-      if (entry['0'].startsWith('{')) {
-        moduleInfo = JSON.parse(entry['0']);
-        subsystem = moduleInfo.subsystem || moduleInfo.module || 'system';
-      } else {
-        // It's a plain string message (like error messages)
-        subsystem = 'openclaw';
-      }
+    if (entry['0'] && entry['0'].startsWith('{')) {
+      const moduleInfo = JSON.parse(entry['0']);
+      subsystem = moduleInfo.subsystem || moduleInfo.module || 'system';
+    } else if (entry['0']) {
+      subsystem = 'openclaw';
     }
   } catch {
     subsystem = 'openclaw';
   }
 
-  // Get the message from field "2" or "1" (some logs put message in "1" as string)
+  // Get the raw message from field "2" or "1"
   let rawMessage = entry['2'] || '';
   if (!rawMessage && typeof entry['1'] === 'string') {
     rawMessage = stripAnsi(entry['1']);
@@ -71,109 +63,123 @@ function transformLogEntry(entry) {
   }
 
   // Get data from field "1" if it's an object
-  const data = typeof entry['1'] === 'object' ? entry['1'] : {};
+  const data = typeof entry['1'] === 'object' && entry['1'] !== null ? entry['1'] : {};
 
   // Determine event type and create friendly message
   let eventType = 'system';
-  let friendlyMessage = rawMessage;
+  let friendlyMessage = '';
+  let shouldInclude = true;
 
-  // === USER MESSAGE ===
+  // === USER MESSAGE (from web-inbound) ===
   if (subsystem === 'web-inbound' && rawMessage === 'inbound message') {
     eventType = 'user-message';
     friendlyMessage = data.body || 'Message received';
   }
-  // === INBOUND WEB MESSAGE (with formatted body) ===
+  // === USER MESSAGE (from web-auto-reply with body) ===
   else if (subsystem === 'web-auto-reply' && rawMessage === 'inbound web message') {
-    eventType = 'user-message';
-    // Extract just the message from formatted body like "[WhatsApp +xxx +7m 2026-02-01 11:41 GMT+1] hola"
-    const body = data.body || '';
-    const match = body.match(/\] (.+)$/);
-    friendlyMessage = match ? `You: ${match[1]}` : `You: ${body}`;
+    // Skip this one - we already show from web-inbound
+    shouldInclude = false;
   }
-  // === AGENT RESPONSE ===
+  // === AGENT RESPONSE (the actual reply text) ===
   else if (rawMessage === 'auto-reply sent (text)' || rawMessage.includes('auto-reply sent')) {
     eventType = 'agent-response';
     friendlyMessage = data.text || 'Agent replied';
   }
   // === AGENT THINKING START ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run start')) {
+  else if (subsystem === 'agent/embedded' && typeof entry['1'] === 'string' && entry['1'].includes('run start')) {
     eventType = 'agent-thinking';
-    // Extract model info from the message
-    const modelMatch = rawMessage.match(/model=([^\s]+)/);
-    const model = modelMatch ? modelMatch[1] : 'unknown';
-    friendlyMessage = `Thinking... (${model})`;
-  }
-  // === AGENT PROMPT START ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run prompt start')) {
-    eventType = 'agent-thinking';
-    friendlyMessage = 'Processing prompt...';
-  }
-  // === AGENT PROMPT END ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run prompt end')) {
-    eventType = 'agent-thinking';
-    const duration = rawMessage.match(/durationMs=(\d+)/);
-    friendlyMessage = `Prompt complete (${duration ? duration[1] + 'ms' : ''})`;
-  }
-  // === AGENT RUN END ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run agent end')) {
-    eventType = 'agent-thinking';
-    friendlyMessage = 'Agent finished thinking';
+    const msg = entry['1'];
+    const modelMatch = msg.match(/model=([^\s]+)/);
+    const model = modelMatch ? modelMatch[1].replace('anthropic/', '').replace('openai/', '') : '';
+    friendlyMessage = model ? `Thinking with ${model}...` : 'Thinking...';
   }
   // === AGENT DONE ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run done')) {
+  else if (subsystem === 'agent/embedded' && typeof entry['1'] === 'string' && entry['1'].includes('run done')) {
     eventType = 'agent-thinking';
-    const duration = rawMessage.match(/durationMs=(\d+)/);
-    const aborted = rawMessage.includes('aborted=true');
-    friendlyMessage = aborted ? 'Agent aborted' : `Agent complete (${duration ? duration[1] + 'ms' : ''})`;
+    const msg = entry['1'];
+    const durationMatch = msg.match(/durationMs=(\d+)/);
+    const duration = durationMatch ? (parseInt(durationMatch[1]) / 1000).toFixed(1) : '';
+    const aborted = msg.includes('aborted=true');
+    friendlyMessage = aborted ? 'Aborted' : (duration ? `Done (${duration}s)` : 'Done');
   }
-  // === TOOL USE ===
-  else if (subsystem === 'agent/embedded' && rawMessage.includes('run tool')) {
+  // === TOOL USE START ===
+  else if (subsystem === 'agent/embedded' && typeof entry['1'] === 'string' && entry['1'].includes('run tool start')) {
     eventType = 'tool-use';
-    const toolMatch = rawMessage.match(/tool=([^\s]+)/);
+    const msg = entry['1'];
+    const toolMatch = msg.match(/tool=([^\s]+)/);
     const tool = toolMatch ? toolMatch[1] : 'unknown';
-    if (rawMessage.includes('start')) {
-      friendlyMessage = `Using tool: ${tool}`;
-    } else {
-      friendlyMessage = `Tool finished: ${tool}`;
-    }
+    friendlyMessage = `Using ${tool}`;
   }
-  // === WHATSAPP OUTBOUND ===
-  else if (subsystem.includes('whatsapp/outbound')) {
-    if (rawMessage.includes('Auto-replied')) {
-      eventType = 'agent-response';
-      friendlyMessage = rawMessage;
-    } else if (rawMessage.includes('Sent chunk')) {
-      eventType = 'agent-response';
-      const match = rawMessage.match(/to ([\+\d]+)/);
-      friendlyMessage = match ? `Sent to ${match[1]}` : rawMessage;
-    } else {
-      eventType = 'system';
-    }
+  // === TOOL USE END ===
+  else if (subsystem === 'agent/embedded' && typeof entry['1'] === 'string' && entry['1'].includes('run tool end')) {
+    // Skip tool end - we already show tool start
+    shouldInclude = false;
   }
-  // === WHATSAPP INBOUND ===
-  else if (subsystem.includes('whatsapp/inbound')) {
-    eventType = 'user-message';
-    friendlyMessage = rawMessage;
+  // === Skip other agent/embedded noise ===
+  else if (subsystem === 'agent/embedded') {
+    shouldInclude = false;
   }
   // === ERRORS ===
   else if (level === 'ERROR') {
     eventType = 'error';
     friendlyMessage = rawMessage || entry['0'] || 'Error occurred';
   }
-  // === MEMORY (usually hidden) ===
+  // === WhatsApp inbound info ===
+  else if (subsystem === 'gateway/channels/whatsapp/inbound') {
+    // Skip - we show the web-inbound message
+    shouldInclude = false;
+  }
+  // === WhatsApp outbound "Auto-replied" ===
+  else if (subsystem === 'gateway/channels/whatsapp/outbound' && typeof entry['1'] === 'string' && entry['1'].includes('Auto-replied')) {
+    // Skip - we show the web-auto-reply with actual text
+    shouldInclude = false;
+  }
+  // === WhatsApp outbound "Sent chunk" ===
+  else if (subsystem === 'gateway/channels/whatsapp/outbound' && typeof entry['1'] === 'string' && entry['1'].includes('Sent chunk')) {
+    // Skip - technical detail
+    shouldInclude = false;
+  }
+  // === Skip other gateway/whatsapp noise ===
+  else if (subsystem.includes('gateway/channels/whatsapp')) {
+    shouldInclude = false;
+  }
+  // === Skip memory ===
   else if (subsystem === 'memory') {
-    eventType = 'system';
-    friendlyMessage = 'Processing memory...';
+    shouldInclude = false;
   }
-  // === HEARTBEAT (usually hidden) ===
+  // === Skip heartbeat ===
   else if (subsystem === 'web-heartbeat') {
-    eventType = 'system';
-    friendlyMessage = `Heartbeat (${data.messagesHandled || 0} messages)`;
+    shouldInclude = false;
   }
-  // === DEFAULT ===
+  // === Skip diagnostic ===
+  else if (subsystem === 'diagnostic') {
+    shouldInclude = false;
+  }
+  // === Skip plugins ===
+  else if (subsystem === 'plugins') {
+    shouldInclude = false;
+  }
+  // === Skip gateway/ws ===
+  else if (subsystem === 'gateway/ws') {
+    shouldInclude = false;
+  }
+  // === Skip openclaw startup noise ===
+  else if (subsystem === 'openclaw' && (!rawMessage || rawMessage.includes('res ✓') || rawMessage.includes('⇄'))) {
+    shouldInclude = false;
+  }
+  // === Other openclaw messages (errors, warnings) ===
+  else if (subsystem === 'openclaw') {
+    eventType = level === 'ERROR' ? 'error' : 'system';
+    friendlyMessage = stripAnsi(rawMessage || entry['0'] || '');
+    if (!friendlyMessage) shouldInclude = false;
+  }
+  // === DEFAULT: skip unknown noise ===
   else {
-    eventType = 'system';
-    friendlyMessage = rawMessage || stripAnsi(entry['1']) || 'System event';
+    shouldInclude = false;
+  }
+
+  if (!shouldInclude || !friendlyMessage) {
+    return null;
   }
 
   return {
@@ -267,5 +273,4 @@ if (process.env.NODE_ENV === 'production') {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Claw Tools server running on http://localhost:${PORT}`);
-  console.log(`Default log directory: ${DEFAULT_LOG_DIR}`);
 });
