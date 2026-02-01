@@ -6,11 +6,12 @@ interface LogEntry {
   timestamp: string
   level: string
   subsystem: string
-  eventType: string
+  eventType: 'user-message' | 'agent-thinking' | 'agent-response' | 'tool-use' | 'error' | 'system'
   message: string
   rawMessage: string
   data: Record<string, unknown>
   raw: Record<string, unknown>
+  hidden?: boolean
 }
 
 interface Settings {
@@ -18,25 +19,10 @@ interface Settings {
   logFile: string
   autoRefresh: boolean
   refreshInterval: number
-  showLevel: string
   limit: number
 }
 
-const EVENT_COLORS: Record<string, string> = {
-  whatsapp: '#25D366',
-  agent: '#646cff',
-  memory: '#f59e0b',
-  heartbeat: '#6b7280',
-  diagnostic: '#8b5cf6',
-  info: '#3b82f6',
-}
-
-const LEVEL_COLORS: Record<string, string> = {
-  ERROR: '#ef4444',
-  WARN: '#f59e0b',
-  INFO: '#3b82f6',
-  DEBUG: '#6b7280',
-}
+const HIDDEN_TAGS_DEFAULT = ['memory', 'web-heartbeat', 'diagnostic', 'plugins', 'gateway/ws']
 
 function App() {
   const [logs, setLogs] = useState<LogEntry[]>([])
@@ -48,12 +34,13 @@ function App() {
     logDir: '/tmp/openclaw',
     logFile: '',
     autoRefresh: true,
-    refreshInterval: 5000,
-    showLevel: 'all',
-    limit: 500,
+    refreshInterval: 3000,
+    limit: 1000,
   })
   const [showSettings, setShowSettings] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
+  const [hiddenTags, setHiddenTags] = useState<Set<string>>(new Set(HIDDEN_TAGS_DEFAULT))
+  const [allTags, setAllTags] = useState<string[]>([])
 
   const logsContainerRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
@@ -66,7 +53,6 @@ function App() {
     }
   }, [autoScroll])
 
-  // Check if user has scrolled up (disable auto-scroll)
   const handleScroll = useCallback(() => {
     if (!logsContainerRef.current) return
     const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current
@@ -80,7 +66,6 @@ function App() {
         dir: settings.logDir,
         ...(settings.logFile && { file: settings.logFile }),
         limit: settings.limit.toString(),
-        level: settings.showLevel,
       })
       const res = await fetch(`${API_BASE}/api/logs?${params}`)
       const data = await res.json()
@@ -90,13 +75,22 @@ function App() {
       } else {
         setError(null)
       }
-      setLogs(data.logs || [])
+
+      const processedLogs = data.logs || []
+      setLogs(processedLogs)
+
+      // Collect all unique tags
+      const tags = new Set<string>()
+      processedLogs.forEach((log: LogEntry) => {
+        if (log.subsystem) tags.add(log.subsystem)
+      })
+      setAllTags(Array.from(tags).sort())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch logs')
     } finally {
       setLoading(false)
     }
-  }, [settings.logDir, settings.logFile, settings.limit, settings.showLevel])
+  }, [settings.logDir, settings.logFile, settings.limit])
 
   const fetchFiles = useCallback(async () => {
     try {
@@ -104,7 +98,7 @@ function App() {
       const data = await res.json()
       setFiles(data.files || [])
     } catch {
-      // Ignore file list errors
+      // Ignore
     }
   }, [settings.logDir])
 
@@ -119,17 +113,30 @@ function App() {
     return () => clearInterval(interval)
   }, [settings.autoRefresh, settings.refreshInterval, fetchLogs])
 
-  // Auto-scroll to bottom when logs change
   useEffect(() => {
     scrollToBottom()
   }, [logs, scrollToBottom])
 
-  // Group consecutive similar messages
-  const groupedLogs = logs.reduce<(LogEntry & { count: number })[]>((acc, log) => {
+  const toggleTag = (tag: string) => {
+    setHiddenTags(prev => {
+      const next = new Set(prev)
+      if (next.has(tag)) {
+        next.delete(tag)
+      } else {
+        next.add(tag)
+      }
+      return next
+    })
+  }
+
+  // Filter and group logs
+  const visibleLogs = logs.filter(log => !hiddenTags.has(log.subsystem))
+
+  const groupedLogs = visibleLogs.reduce<(LogEntry & { count: number })[]>((acc, log) => {
     const prev = acc[acc.length - 1]
-    if (prev && prev.message === log.message && prev.subsystem === log.subsystem) {
+    if (prev && prev.message === log.message && prev.subsystem === log.subsystem && prev.eventType === log.eventType) {
       prev.count++
-      prev.time = log.time // Update to latest time
+      prev.time = log.time
     } else {
       acc.push({ ...log, count: 1 })
     }
@@ -141,17 +148,39 @@ function App() {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
+  const getEventIcon = (eventType: string) => {
+    switch (eventType) {
+      case 'user-message': return '💬'
+      case 'agent-thinking': return '🤔'
+      case 'agent-response': return '🤖'
+      case 'tool-use': return '🔧'
+      case 'error': return '❌'
+      default: return '📋'
+    }
+  }
+
+  const getEventClass = (eventType: string) => {
+    switch (eventType) {
+      case 'user-message': return 'event-user'
+      case 'agent-thinking': return 'event-thinking'
+      case 'agent-response': return 'event-response'
+      case 'tool-use': return 'event-tool'
+      case 'error': return 'event-error'
+      default: return 'event-system'
+    }
+  }
+
   return (
     <div className="app">
       <header className="header">
         <h1>Claw Tools</h1>
         <div className="header-actions">
-          <button onClick={fetchLogs} className="refresh-btn">
+          <button onClick={fetchLogs} className="btn btn-primary">
             Refresh
           </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
-            className={`settings-btn ${showSettings ? 'active' : ''}`}
+            className={`btn btn-secondary ${showSettings ? 'active' : ''}`}
           >
             Settings
           </button>
@@ -160,119 +189,105 @@ function App() {
 
       {showSettings && (
         <div className="settings-panel">
-          <div className="setting">
-            <label>Log Directory</label>
-            <input
-              type="text"
-              value={settings.logDir}
-              onChange={(e) => setSettings({ ...settings, logDir: e.target.value })}
-              placeholder="/tmp/openclaw"
-            />
-          </div>
-          <div className="setting">
-            <label>Log File</label>
-            <select
-              value={settings.logFile}
-              onChange={(e) => setSettings({ ...settings, logFile: e.target.value })}
-            >
-              <option value="">Today's log</option>
-              {files.map(f => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </select>
-          </div>
-          <div className="setting">
-            <label>Log Level</label>
-            <select
-              value={settings.showLevel}
-              onChange={(e) => setSettings({ ...settings, showLevel: e.target.value })}
-            >
-              <option value="all">All</option>
-              <option value="error">Error</option>
-              <option value="warn">Warn</option>
-              <option value="info">Info</option>
-              <option value="debug">Debug</option>
-            </select>
-          </div>
-          <div className="setting">
-            <label>Max Entries</label>
-            <input
-              type="number"
-              value={settings.limit}
-              onChange={(e) => setSettings({ ...settings, limit: parseInt(e.target.value) || 500 })}
-              min={50}
-              max={5000}
-            />
-          </div>
-          <div className="setting checkbox">
-            <label>
+          <div className="settings-row">
+            <div className="setting">
+              <label>Log Directory</label>
               <input
-                type="checkbox"
-                checked={settings.autoRefresh}
-                onChange={(e) => setSettings({ ...settings, autoRefresh: e.target.checked })}
+                type="text"
+                value={settings.logDir}
+                onChange={(e) => setSettings({ ...settings, logDir: e.target.value })}
               />
-              Auto-refresh every {settings.refreshInterval / 1000}s
-            </label>
+            </div>
+            <div className="setting">
+              <label>Log File</label>
+              <select
+                value={settings.logFile}
+                onChange={(e) => setSettings({ ...settings, logFile: e.target.value })}
+              >
+                <option value="">Today's log</option>
+                {files.map(f => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+            </div>
+            <div className="setting">
+              <label>Max Entries</label>
+              <input
+                type="number"
+                value={settings.limit}
+                onChange={(e) => setSettings({ ...settings, limit: parseInt(e.target.value) || 1000 })}
+                min={100}
+                max={10000}
+              />
+            </div>
+            <div className="setting checkbox">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.autoRefresh}
+                  onChange={(e) => setSettings({ ...settings, autoRefresh: e.target.checked })}
+                />
+                Auto-refresh
+              </label>
+            </div>
+          </div>
+
+          <div className="tags-filter">
+            <span className="tags-label">Filter tags:</span>
+            <div className="tags-list">
+              {allTags.map(tag => (
+                <button
+                  key={tag}
+                  className={`tag-btn ${hiddenTags.has(tag) ? 'hidden' : 'visible'}`}
+                  onClick={() => toggleTag(tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
 
       {error && (
-        <div className="error-banner">
-          {error}
-        </div>
+        <div className="error-banner">{error}</div>
       )}
 
-      <main
-        className="logs-container"
-        ref={logsContainerRef}
-        onScroll={handleScroll}
-      >
+      <main className="logs-container" ref={logsContainerRef} onScroll={handleScroll}>
         {loading ? (
-          <div className="loading">Loading logs...</div>
+          <div className="loading">Loading...</div>
         ) : groupedLogs.length === 0 ? (
           <div className="empty">No logs found</div>
         ) : (
-          <div className="logs-list">
+          <div className="chat-list">
             {groupedLogs.map((log, i) => (
               <div
                 key={i}
-                className={`log-entry ${log.level.toLowerCase()} ${expandedLog === i ? 'expanded' : ''}`}
+                className={`chat-entry ${getEventClass(log.eventType)} ${expandedLog === i ? 'expanded' : ''}`}
                 onClick={() => setExpandedLog(expandedLog === i ? null : i)}
               >
-                <div className="log-main">
-                  <span className="log-time">{log.time}</span>
-                  <span
-                    className="log-type"
-                    style={{ backgroundColor: EVENT_COLORS[log.eventType] || EVENT_COLORS.info }}
-                  >
-                    {log.subsystem}
-                  </span>
-                  <span
-                    className="log-level"
-                    style={{ color: LEVEL_COLORS[log.level] || '#6b7280' }}
-                  >
-                    {log.level}
-                  </span>
-                  <span className="log-message">{log.message}</span>
-                  {log.count > 1 && (
-                    <span className="log-count">x{log.count}</span>
+                <div className="chat-icon">{getEventIcon(log.eventType)}</div>
+                <div className="chat-content">
+                  <div className="chat-header">
+                    <span className="chat-time">{log.time}</span>
+                    <span className={`chat-tag tag-${log.eventType}`}>{log.subsystem}</span>
+                    {log.count > 1 && <span className="chat-count">×{log.count}</span>}
+                  </div>
+                  <div className="chat-message">{log.message}</div>
+                  {expandedLog === i && (
+                    <div className="chat-details">
+                      {log.rawMessage !== log.message && (
+                        <div className="detail-row">
+                          <span className="detail-label">Raw:</span>
+                          <span className="detail-value">{log.rawMessage}</span>
+                        </div>
+                      )}
+                      {Object.keys(log.data).length > 0 && (
+                        <pre className="detail-json">{JSON.stringify(log.data, null, 2)}</pre>
+                      )}
+                    </div>
                   )}
                 </div>
-                {expandedLog === i && (
-                  <div className="log-details">
-                    <div className="detail-section">
-                      <strong>Raw Message:</strong>
-                      <code>{log.rawMessage}</code>
-                    </div>
-                    {Object.keys(log.data).length > 0 && (
-                      <div className="detail-section">
-                        <strong>Data:</strong>
-                        <pre>{JSON.stringify(log.data, null, 2)}</pre>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             ))}
             <div ref={logsEndRef} />
@@ -281,14 +296,14 @@ function App() {
       </main>
 
       {!autoScroll && (
-        <button className="jump-to-bottom" onClick={jumpToBottom}>
-          Jump to latest
+        <button className="jump-btn" onClick={jumpToBottom}>
+          ↓ Jump to latest
         </button>
       )}
 
       <footer className="footer">
-        <span>{logs.length} entries ({groupedLogs.length} grouped)</span>
-        {settings.autoRefresh && <span className="pulse">Live</span>}
+        <span>{visibleLogs.length} of {logs.length} entries</span>
+        {settings.autoRefresh && <span className="live-indicator">● Live</span>}
       </footer>
     </div>
   )

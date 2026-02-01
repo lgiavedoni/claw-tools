@@ -10,38 +10,33 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Default log path
 const DEFAULT_LOG_DIR = '/tmp/openclaw';
 
-// Get today's date for default log file
 function getTodayLogFile() {
   const today = new Date().toISOString().split('T')[0];
   return `openclaw-${today}.log`;
 }
 
-// Parse a single log line
 function parseLogLine(line) {
-  // Log format: "HH:MM:SS AM/PM\nlevel\nsubsystem\n{json}"
-  // But in the file it's typically one JSON per line with prefix
   const trimmed = line.trim();
   if (!trimmed) return null;
 
-  // Try to find JSON in the line
   const jsonMatch = trimmed.match(/\{.*\}$/);
-  if (!jsonMatch) {
-    // Might be a time, level, or subsystem line - skip
-    return null;
-  }
+  if (!jsonMatch) return null;
 
   try {
-    const json = JSON.parse(jsonMatch[0]);
-    return json;
+    return JSON.parse(jsonMatch[0]);
   } catch {
     return null;
   }
 }
 
-// Transform raw log entry to friendly format
+// Strip ANSI codes from strings
+function stripAnsi(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 function transformLogEntry(entry) {
   if (!entry) return null;
 
@@ -49,56 +44,136 @@ function transformLogEntry(entry) {
   const time = entry.time || meta.date;
   const level = meta.logLevelName || 'UNKNOWN';
 
-  // Get subsystem from the "0" field or meta.name
+  // Get subsystem
   let subsystem = 'system';
+  let moduleInfo = {};
   try {
     if (entry['0']) {
-      const parsed = JSON.parse(entry['0']);
-      subsystem = parsed.subsystem || parsed.module || 'system';
+      if (entry['0'].startsWith('{')) {
+        moduleInfo = JSON.parse(entry['0']);
+        subsystem = moduleInfo.subsystem || moduleInfo.module || 'system';
+      } else {
+        // It's a plain string message (like error messages)
+        subsystem = 'openclaw';
+      }
     }
   } catch {
-    subsystem = meta.name || 'system';
+    subsystem = 'openclaw';
   }
 
-  // Get the human-readable message from field "2"
-  const message = entry['2'] || '';
+  // Get the message from field "2" or "1" (some logs put message in "1" as string)
+  let rawMessage = entry['2'] || '';
+  if (!rawMessage && typeof entry['1'] === 'string') {
+    rawMessage = stripAnsi(entry['1']);
+  }
+  if (!rawMessage && typeof entry['0'] === 'string' && !entry['0'].startsWith('{')) {
+    rawMessage = stripAnsi(entry['0']);
+  }
 
-  // Get additional data from field "1"
-  const data = entry['1'] || {};
+  // Get data from field "1" if it's an object
+  const data = typeof entry['1'] === 'object' ? entry['1'] : {};
 
-  // Determine event type for friendly display
-  let eventType = 'info';
-  let friendlyMessage = message;
+  // Determine event type and create friendly message
+  let eventType = 'system';
+  let friendlyMessage = rawMessage;
 
-  // Categorize and make messages more friendly
-  if (subsystem.includes('whatsapp')) {
-    eventType = 'whatsapp';
-    if (message.includes('Sent chunk')) {
-      const match = message.match(/Sent chunk \d+\/\d+ to ([\+\d]+)/);
-      friendlyMessage = match ? `Message sent to ${match[1]}` : message;
-    } else if (message.includes('auto-reply sent')) {
-      friendlyMessage = `Auto-reply sent: ${data.text?.substring(0, 100) || message}`;
+  // === USER MESSAGE ===
+  if (subsystem === 'web-inbound' && rawMessage === 'inbound message') {
+    eventType = 'user-message';
+    friendlyMessage = data.body || 'Message received';
+  }
+  // === INBOUND WEB MESSAGE (with formatted body) ===
+  else if (subsystem === 'web-auto-reply' && rawMessage === 'inbound web message') {
+    eventType = 'user-message';
+    // Extract just the message from formatted body like "[WhatsApp +xxx +7m 2026-02-01 11:41 GMT+1] hola"
+    const body = data.body || '';
+    const match = body.match(/\] (.+)$/);
+    friendlyMessage = match ? `You: ${match[1]}` : `You: ${body}`;
+  }
+  // === AGENT RESPONSE ===
+  else if (rawMessage === 'auto-reply sent (text)' || rawMessage.includes('auto-reply sent')) {
+    eventType = 'agent-response';
+    friendlyMessage = data.text || 'Agent replied';
+  }
+  // === AGENT THINKING START ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run start')) {
+    eventType = 'agent-thinking';
+    // Extract model info from the message
+    const modelMatch = rawMessage.match(/model=([^\s]+)/);
+    const model = modelMatch ? modelMatch[1] : 'unknown';
+    friendlyMessage = `Thinking... (${model})`;
+  }
+  // === AGENT PROMPT START ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run prompt start')) {
+    eventType = 'agent-thinking';
+    friendlyMessage = 'Processing prompt...';
+  }
+  // === AGENT PROMPT END ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run prompt end')) {
+    eventType = 'agent-thinking';
+    const duration = rawMessage.match(/durationMs=(\d+)/);
+    friendlyMessage = `Prompt complete (${duration ? duration[1] + 'ms' : ''})`;
+  }
+  // === AGENT RUN END ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run agent end')) {
+    eventType = 'agent-thinking';
+    friendlyMessage = 'Agent finished thinking';
+  }
+  // === AGENT DONE ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run done')) {
+    eventType = 'agent-thinking';
+    const duration = rawMessage.match(/durationMs=(\d+)/);
+    const aborted = rawMessage.includes('aborted=true');
+    friendlyMessage = aborted ? 'Agent aborted' : `Agent complete (${duration ? duration[1] + 'ms' : ''})`;
+  }
+  // === TOOL USE ===
+  else if (subsystem === 'agent/embedded' && rawMessage.includes('run tool')) {
+    eventType = 'tool-use';
+    const toolMatch = rawMessage.match(/tool=([^\s]+)/);
+    const tool = toolMatch ? toolMatch[1] : 'unknown';
+    if (rawMessage.includes('start')) {
+      friendlyMessage = `Using tool: ${tool}`;
+    } else {
+      friendlyMessage = `Tool finished: ${tool}`;
     }
-  } else if (subsystem === 'memory') {
-    eventType = 'memory';
-    if (message.includes('gemini batch')) {
-      friendlyMessage = 'Processing memory embeddings...';
+  }
+  // === WHATSAPP OUTBOUND ===
+  else if (subsystem.includes('whatsapp/outbound')) {
+    if (rawMessage.includes('Auto-replied')) {
+      eventType = 'agent-response';
+      friendlyMessage = rawMessage;
+    } else if (rawMessage.includes('Sent chunk')) {
+      eventType = 'agent-response';
+      const match = rawMessage.match(/to ([\+\d]+)/);
+      friendlyMessage = match ? `Sent to ${match[1]}` : rawMessage;
+    } else {
+      eventType = 'system';
     }
-  } else if (subsystem.includes('agent')) {
-    eventType = 'agent';
-    if (message.includes('run agent end')) {
-      friendlyMessage = 'Agent completed task';
-    } else if (message.includes('run prompt end')) {
-      friendlyMessage = `Agent response ready (${data.durationMs}ms)`;
-    }
-  } else if (subsystem === 'web-heartbeat') {
-    eventType = 'heartbeat';
-    friendlyMessage = `Gateway alive - ${data.messagesHandled || 0} messages handled`;
-  } else if (subsystem.includes('diagnostic')) {
-    eventType = 'diagnostic';
-    if (message.includes('session state')) {
-      friendlyMessage = `Session: ${data.prev} -> ${data.new}`;
-    }
+  }
+  // === WHATSAPP INBOUND ===
+  else if (subsystem.includes('whatsapp/inbound')) {
+    eventType = 'user-message';
+    friendlyMessage = rawMessage;
+  }
+  // === ERRORS ===
+  else if (level === 'ERROR') {
+    eventType = 'error';
+    friendlyMessage = rawMessage || entry['0'] || 'Error occurred';
+  }
+  // === MEMORY (usually hidden) ===
+  else if (subsystem === 'memory') {
+    eventType = 'system';
+    friendlyMessage = 'Processing memory...';
+  }
+  // === HEARTBEAT (usually hidden) ===
+  else if (subsystem === 'web-heartbeat') {
+    eventType = 'system';
+    friendlyMessage = `Heartbeat (${data.messagesHandled || 0} messages)`;
+  }
+  // === DEFAULT ===
+  else {
+    eventType = 'system';
+    friendlyMessage = rawMessage || stripAnsi(entry['1']) || 'System event';
   }
 
   return {
@@ -108,19 +183,17 @@ function transformLogEntry(entry) {
     subsystem,
     eventType,
     message: friendlyMessage,
-    rawMessage: message,
+    rawMessage: rawMessage || '',
     data,
     raw: entry
   };
 }
 
-// API: Get logs
 app.get('/api/logs', (req, res) => {
   const logDir = req.query.dir || DEFAULT_LOG_DIR;
   const logFile = req.query.file || getTodayLogFile();
   const logPath = path.join(logDir, logFile);
-  const limit = parseInt(req.query.limit) || 500;
-  const level = req.query.level || 'all';
+  const limit = parseInt(req.query.limit) || 1000;
 
   try {
     if (!fs.existsSync(logPath)) {
@@ -134,22 +207,17 @@ app.get('/api/logs', (req, res) => {
     const content = fs.readFileSync(logPath, 'utf-8');
     const lines = content.split('\n');
 
-    // Parse and transform logs
     const logs = [];
     for (const line of lines) {
       const parsed = parseLogLine(line);
       if (parsed) {
         const transformed = transformLogEntry(parsed);
         if (transformed) {
-          // Filter by level if specified
-          if (level === 'all' || transformed.level.toLowerCase() === level.toLowerCase()) {
-            logs.push(transformed);
-          }
+          logs.push(transformed);
         }
       }
     }
 
-    // Return latest logs (tail)
     const result = logs.slice(-limit);
 
     res.json({
@@ -163,7 +231,6 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
-// API: List available log files
 app.get('/api/logs/files', (req, res) => {
   const logDir = req.query.dir || DEFAULT_LOG_DIR;
 
@@ -183,7 +250,6 @@ app.get('/api/logs/files', (req, res) => {
   }
 });
 
-// API: Get settings
 app.get('/api/settings', (req, res) => {
   res.json({
     defaultLogDir: DEFAULT_LOG_DIR,
@@ -191,10 +257,8 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// Serve static files in production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, 'dist')));
-  // Express 5 requires named wildcard parameter
   app.get('/{*splat}', (req, res) => {
     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
   });
