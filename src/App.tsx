@@ -32,6 +32,9 @@ function App() {
   const [logFile, setLogFile] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
+  const [showTools, setShowTools] = useState(true)
+  const [showErrors, setShowErrors] = useState(true)
+  const [showThinking, setShowThinking] = useState(false)
 
   const logsContainerRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
@@ -246,6 +249,37 @@ function App() {
               Auto-refresh
             </label>
           </div>
+          <div className="settings-divider" />
+          <div className="setting checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={showTools}
+                onChange={(e) => setShowTools(e.target.checked)}
+              />
+              Show tools
+            </label>
+          </div>
+          <div className="setting checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={showErrors}
+                onChange={(e) => setShowErrors(e.target.checked)}
+              />
+              Show errors
+            </label>
+          </div>
+          <div className="setting checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={showThinking}
+                onChange={(e) => setShowThinking(e.target.checked)}
+              />
+              Show thinking
+            </label>
+          </div>
         </div>
       )}
 
@@ -285,44 +319,60 @@ function App() {
                 )}
 
                 {/* Intermediate Events (collapsed by default) */}
-                {group.intermediateEvents.length > 0 && (
-                  <div className="intermediate-section">
-                    <button
-                      className="intermediate-toggle"
-                      onClick={() => toggleGroupExpand(group.id)}
-                    >
-                      {expandedGroups.has(group.id) ? '▼' : '▶'}
-                      {group.intermediateEvents.length} event{group.intermediateEvents.length !== 1 ? 's' : ''}
-                      ({group.intermediateEvents.filter(e => e.eventType === 'tool-use').length} tools,
-                      {group.intermediateEvents.filter(e => e.eventType === 'error').length} errors)
-                    </button>
+                {(() => {
+                  const filteredEvents = group.intermediateEvents.filter(e => {
+                    if (e.eventType === 'tool-use' && !showTools) return false
+                    if (e.eventType === 'error' && !showErrors) return false
+                    if (e.eventType === 'agent-thinking' && !showThinking) return false
+                    return true
+                  })
 
-                    {expandedGroups.has(group.id) && (
-                      <div className="intermediate-events">
-                        {group.intermediateEvents.map((event, i) => (
-                          <div
-                            key={i}
-                            className={`intermediate-event event-${event.eventType}`}
-                            onClick={() => toggleDetails(`event-${group.id}-${i}`)}
-                          >
-                            <span className="event-icon">
-                              {event.eventType === 'tool-use' ? '🔧' :
-                               event.eventType === 'error' ? '❌' :
-                               event.eventType === 'agent-thinking' ? '💭' : '📋'}
-                            </span>
-                            <span className="event-time">{event.time}</span>
-                            <span className="event-message">{event.message}</span>
-                            {expandedDetails.has(`event-${group.id}-${i}`) && (
-                              <pre className="event-details">
-                                {JSON.stringify(event.raw || event.data, null, 2)}
-                              </pre>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                  if (filteredEvents.length === 0) return null
+
+                  const toolCount = filteredEvents.filter(e => e.eventType === 'tool-use').length
+                  const errorCount = filteredEvents.filter(e => e.eventType === 'error').length
+                  const thinkingCount = filteredEvents.filter(e => e.eventType === 'agent-thinking').length
+
+                  return (
+                    <div className="intermediate-section">
+                      <button
+                        className="intermediate-toggle"
+                        onClick={() => toggleGroupExpand(group.id)}
+                      >
+                        {expandedGroups.has(group.id) ? '▼' : '▶'}
+                        {filteredEvents.length} event{filteredEvents.length !== 1 ? 's' : ''}
+                        {toolCount > 0 && ` (${toolCount} tool${toolCount !== 1 ? 's' : ''})`}
+                        {errorCount > 0 && ` (${errorCount} error${errorCount !== 1 ? 's' : ''})`}
+                        {thinkingCount > 0 && ` (${thinkingCount} thinking)`}
+                      </button>
+
+                      {expandedGroups.has(group.id) && (
+                        <div className="intermediate-events">
+                          {filteredEvents.map((event, i) => (
+                            <div
+                              key={i}
+                              className={`intermediate-event event-${event.eventType}`}
+                              onClick={() => toggleDetails(`event-${group.id}-${i}`)}
+                            >
+                              <span className="event-icon">
+                                {event.eventType === 'tool-use' ? '🔧' :
+                                 event.eventType === 'error' ? '❌' :
+                                 event.eventType === 'agent-thinking' ? '💭' : '📋'}
+                              </span>
+                              <span className="event-time">{event.time}</span>
+                              <span className="event-message">{event.message}</span>
+                              {expandedDetails.has(`event-${group.id}-${i}`) && (
+                                <pre className="event-details">
+                                  {JSON.stringify(event.raw || event.data, null, 2)}
+                                </pre>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
 
                 {/* Loading indicator when thinking */}
                 {group.isThinking && !group.agentResponse && (
@@ -362,29 +412,40 @@ function App() {
                 )}
 
                 {/* Standalone events (errors without context) */}
-                {!group.userMessage && !group.agentResponse && group.intermediateEvents.length > 0 && (
-                  <div className="standalone-events">
-                    {group.intermediateEvents.map((event, i) => (
-                      <div
-                        key={i}
-                        className={`standalone-event event-${event.eventType}`}
-                        onClick={() => toggleDetails(`standalone-${group.id}-${i}`)}
-                      >
-                        <span className="event-icon">
-                          {event.eventType === 'tool-use' ? '🔧' :
-                           event.eventType === 'error' ? '❌' : '📋'}
-                        </span>
-                        <span className="event-time">{event.time}</span>
-                        <span className="event-message">{event.message}</span>
-                        {expandedDetails.has(`standalone-${group.id}-${i}`) && (
-                          <pre className="event-details">
-                            {JSON.stringify(event.raw || event.data, null, 2)}
-                          </pre>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {!group.userMessage && !group.agentResponse && group.intermediateEvents.length > 0 && (() => {
+                  const filteredStandalone = group.intermediateEvents.filter(e => {
+                    if (e.eventType === 'tool-use' && !showTools) return false
+                    if (e.eventType === 'error' && !showErrors) return false
+                    if (e.eventType === 'agent-thinking' && !showThinking) return false
+                    return true
+                  })
+
+                  if (filteredStandalone.length === 0) return null
+
+                  return (
+                    <div className="standalone-events">
+                      {filteredStandalone.map((event, i) => (
+                        <div
+                          key={i}
+                          className={`standalone-event event-${event.eventType}`}
+                          onClick={() => toggleDetails(`standalone-${group.id}-${i}`)}
+                        >
+                          <span className="event-icon">
+                            {event.eventType === 'tool-use' ? '🔧' :
+                             event.eventType === 'error' ? '❌' : '📋'}
+                          </span>
+                          <span className="event-time">{event.time}</span>
+                          <span className="event-message">{event.message}</span>
+                          {expandedDetails.has(`standalone-${group.id}-${i}`) && (
+                            <pre className="event-details">
+                              {JSON.stringify(event.raw || event.data, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
               </div>
             ))}
             <div ref={logsEndRef} />

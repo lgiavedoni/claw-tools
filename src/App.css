@@ -87,6 +87,13 @@
   cursor: pointer;
 }
 
+.settings-divider {
+  width: 1px;
+  height: 24px;
+  background: #d2d2d7;
+  margin: 0 8px;
+}
+
 .error-banner {
   padding: 10px 20px;
   background: #fff5f5;
